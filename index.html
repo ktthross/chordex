@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chordex</title>
+<style>
+  :root { --bg: #fafaf8; --fg: #1c1c1c; --muted: #6b6b6b; --line: #d0d0d0; --card: #fff; --accent: #d9480f; --hit: #3b8fd6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161616; --fg: #ececec; --muted: #9a9a9a; --line: #3d3d3d; --card: #222; --accent: #ff8a4c; --hit: #5aaef0; }
+  }
+  body { margin: 0 auto; max-width: 960px; padding: 16px; font: 15px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+  h1 { margin: 0 0 8px; font-size: 22px; }
+  h2 { margin: 24px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  button, select { font: inherit; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: inherit; cursor: pointer; }
+  button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0; }
+  #name { font-size: 40px; font-weight: 700; margin-right: 8px; }
+  #notes { color: var(--muted); margin-right: auto; }
+  .chip { display: inline-flex; }
+  .chip button:first-child { border-radius: 6px 0 0 6px; }
+  .chip button:last-child { border-radius: 0 6px 6px 0; border-left: 0; color: var(--muted); padding: 6px 8px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; }
+  #piano { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+  .card { padding: 8px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+  .card svg { width: 100%; height: auto; }
+  .str { stroke: var(--fg); }
+  .lbl { fill: var(--muted); font-size: 10px; }
+  .dot { fill: var(--fg); }
+  .wk { fill: #fff; stroke: #666; } .bk { fill: #222; }
+  .hit { fill: var(--hit); } .root { fill: var(--accent); }
+  .open { fill: none; stroke: var(--fg); } .open.root { stroke: var(--accent); }
+  footer { margin-top: 32px; font-size: 12px; color: var(--muted); } footer a { color: inherit; }
+</style>
+</head>
+<body>
+<h1>Chordex</h1>
+<div class="row" id="roots"></div>
+<div class="row" id="quals"></div>
+
+<div class="row">
+  <span id="name"></span><span id="notes"></span>
+  <select id="inst" aria-label="Sound"><option>Guitar</option><option>Piano</option></select>
+  <button id="play">▶ Play</button>
+  <button id="add">+ Add to progression</button>
+</div>
+
+<h2>Next chord</h2>
+<div class="row" id="next"></div>
+
+<h2>Progression</h2>
+<div class="row" id="prog"></div>
+<div class="row"><button id="playProg">▶ Play progression</button><button id="clear">Clear</button></div>
+
+<h2>Guitar</h2>
+<div class="grid" id="guitar"></div>
+
+<h2>Piano</h2>
+<div class="grid" id="piano"></div>
+
+<footer>
+  Instrument samples: FluidR3_GM by Frank Wen, rendered to MP3 by
+  <a href="https://github.com/gleitz/midi-js-soundfonts">gleitz/midi-js-soundfonts</a>,
+  licensed <a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>.
+</footer>
+
+<script src="chords.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let cur = { r: 0, q: '' };
+let gv = [], pv = [];
+let prog = [];
+try { prog = (JSON.parse(localStorage.getItem('chordex')) || []).filter(c => NOTES[c.r] && QUALITIES.has(c.q)); } catch {}
+const save = () => { try { localStorage.setItem('chordex', JSON.stringify(prog)); } catch {} };
+
+// --- sound: one FluidR3 mp3 per MIDI note in samples/<instrument>/ ---
+// <audio> rather than Web Audio because fetch() can't read file:// pages' local files.
+// ponytail: setTimeout timing (a few ms jitter); switch to Web Audio + a local server if tighter timing matters.
+const audio = {};
+function play(midis, guitar, delay = 0) {
+  midis.forEach((m, i) => setTimeout(() => {
+    const src = `samples/${guitar ? 'guitar' : 'piano'}/${m}.mp3`;
+    const a = (audio[src] ??= new Audio(src)).cloneNode();
+    a.volume = 0.5;
+    a.play().catch(() => {});
+  }, (delay + (guitar ? i * 0.035 : 0)) * 1000)); // stagger = strum
+}
+const guitarMidis = frets => frets.flatMap((f, i) => (f >= 0 ? [TUNING[i] + f] : []));
+function playChord(c, delay) {
+  const guitar = $('inst').value === 'Guitar';
+  const g = guitar && guitarVoicings(c.r, c.q, 1)[0];
+  play(g ? guitarMidis(g.frets) : pianoVoicings(c.r, c.q)[0].notes, !!g, delay);
+}
+
+// --- drawing ---
+function guitarSvg(frets, root) {
+  const fretted = frets.filter(f => f > 0);
+  const start = Math.max(...frets) <= 5 ? 1 : Math.min(...fretted);
+  const x = i => 22 + i * 14;
+  let s = '';
+  for (let k = 0; k <= 5; k++) s += `<line class="str" x1="22" x2="92" y1="${25 + k * 20}" y2="${25 + k * 20}" stroke-width="${!k && start === 1 ? 4 : 1}"/>`;
+  for (let i = 0; i < 6; i++) s += `<line class="str" x1="${x(i)}" x2="${x(i)}" y1="25" y2="125"/>`;
+  if (start > 1) s += `<text class="lbl" x="0" y="39">${start}fr</text>`;
+  frets.forEach((f, i) => {
+    const cls = (TUNING[i] + f) % 12 === root ? 'root' : 'dot';
+    if (f < 0) s += `<text class="lbl" x="${x(i)}" y="18" text-anchor="middle">×</text>`;
+    else if (!f) s += `<circle class="open ${cls}" cx="${x(i)}" cy="14" r="4"/>`;
+    else s += `<circle class="${cls}" cx="${x(i)}" cy="${25 + (f - start + 0.5) * 20}" r="6"/>`;
+  });
+  return `<svg viewBox="0 0 100 130" aria-hidden="true">${s}</svg>`;
+}
+
+function pianoSvg(notes, root) {
+  const lo = Math.floor(notes[0] / 12) * 12;
+  const hi = Math.max(Math.floor(notes.at(-1) / 12) * 12 + 12, lo + 24);
+  let white = '', black = '', wx = 0;
+  for (let m = lo; m < hi; m++) {
+    const cls = !notes.includes(m) ? '' : m % 12 === root ? 'root' : 'hit';
+    if ([0, 2, 4, 5, 7, 9, 11].includes(m % 12)) { white += `<rect class="wk ${cls}" x="${wx}" width="14" height="60"/>`; wx += 14; }
+    else black += `<rect class="bk ${cls}" x="${wx - 4.5}" width="9" height="38"/>`;
+  }
+  return `<svg viewBox="-1 -1 ${wx + 2} 62" aria-hidden="true">${white}${black}</svg>`;
+}
+
+const noteNames = midis => midis.map(m => NOTES[m % 12]).join(' ');
+
+// --- UI ---
+function select(c) { cur = { ...c }; render(); }
+
+function render() {
+  $('roots').innerHTML = NOTES.map((n, r) => `<button class="${r === cur.r ? 'on' : ''}" data-r="${r}">${n}</button>`).join('');
+  $('quals').innerHTML = [...QUALITIES.keys()].map(q => `<button class="${q === cur.q ? 'on' : ''}" data-q="${q}">${q || 'maj'}</button>`).join('');
+  const [iv, next] = QUALITIES.get(cur.q);
+  $('name').textContent = chordName(cur);
+  $('notes').textContent = iv.map(i => NOTES[(cur.r + i) % 12]).join(' ');
+  $('next').innerHTML = next.map(([d, q]) => {
+    const r = (cur.r + d) % 12;
+    return `<button data-r="${r}" data-q="${q}">${chordName({ r, q })}</button>`;
+  }).join('');
+  $('prog').innerHTML = prog.map((c, i) =>
+    `<span class="chip"><button class="${c.r === cur.r && c.q === cur.q ? 'on' : ''}" data-i="${i}">${chordName(c)}</button>` +
+    `<button data-i="${i}" data-x aria-label="Remove ${chordName(c)}">×</button></span>`).join('') || '<span style="color: var(--muted)">Empty — pick a chord and add it, or tap a next chord.</span>';
+
+  gv = guitarVoicings(cur.r, cur.q);
+  $('guitar').innerHTML = gv.map((v, i) =>
+    `<button class="card" data-i="${i}" aria-label="Play ${shape(v.frets)}">${guitarSvg(v.frets, cur.r)}${shape(v.frets)}</button>`).join('') || 'No playable voicing found.';
+  pv = pianoVoicings(cur.r, cur.q);
+  $('piano').innerHTML = pv.map((v, i) =>
+    `<button class="card" data-i="${i}">${pianoSvg(v.notes, cur.r)}<span>${v.label} · ${noteNames(v.notes)}</span></button>`).join('');
+}
+
+const on = (id, fn) => $(id).addEventListener('click', e => { const b = e.target.closest('button'); if (b) fn(b.dataset); });
+on('roots', d => select({ ...cur, r: +d.r }));
+on('quals', d => select({ ...cur, q: d.q }));
+on('next', d => {
+  const c = { r: +d.r, q: d.q };
+  if (!prog.length) prog.push({ ...cur });
+  prog.push(c);
+  save();
+  select(c);
+  playChord(c);
+});
+on('prog', d => {
+  if ('x' in d) { prog.splice(+d.i, 1); save(); render(); }
+  else { select(prog[+d.i]); playChord(cur); }
+});
+on('guitar', d => play(guitarMidis(gv[+d.i].frets), true));
+on('piano', d => play(pv[+d.i].notes, false));
+$('play').onclick = () => playChord(cur);
+$('add').onclick = () => { prog.push({ ...cur }); save(); render(); };
+$('playProg').onclick = () => prog.forEach((c, i) => playChord(c, i * 1.2));
+$('clear').onclick = () => { if (prog.length && confirm('Clear the progression?')) { prog = []; save(); render(); } };
+
+render();
+</script>
+</body>
+</html>
