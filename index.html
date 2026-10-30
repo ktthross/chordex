@@ -74,23 +74,50 @@ try { prog = (JSON.parse(localStorage.getItem('chordex')) || []).filter(c => NOT
 const save = () => { try { localStorage.setItem('chordex', JSON.stringify(prog)); } catch {} };
 
 // --- sound: one FluidR3 mp3 per MIDI note in samples/<instrument>/ ---
-// <audio> rather than Web Audio because fetch() can't read file:// pages' local files.
-// ponytail: setTimeout timing (a few ms jitter); switch to Web Audio + a local server if tighter timing matters.
+// Served over http(s): Web Audio, and every note of a chord is decoded before any starts, so a note
+// still downloading can't lag behind the rest. Opened from disk, fetch() is blocked, so use <audio>.
+const fromDisk = location.protocol === 'file:';
+const ctx = new AudioContext();
+const out = ctx.createGain();
+out.gain.value = 0.5;
+out.connect(ctx.destination);
+document.addEventListener('click', () => ctx.resume()); // browsers keep audio suspended until a user gesture
+
+const sample = (m, guitar) => `samples/${guitar ? 'guitar' : 'piano'}/${m}.mp3`;
+const buffers = {};
+const load = src => (buffers[src] ??= fetch(src).then(r => r.arrayBuffer()).then(b => ctx.decodeAudioData(b))
+  .catch(() => { delete buffers[src]; return null; })); // retry on the next play
+const loadAll = (midis, guitar) => Promise.all(fromDisk ? [] : midis.map(m => load(sample(m, guitar))));
+
+async function play(midis, guitar, delay = 0) {
+  if (fromDisk) return playFromDisk(midis, guitar, delay);
+  const bufs = await loadAll(midis, guitar);
+  const t0 = ctx.currentTime + 0.02 + delay;
+  bufs.forEach((b, i) => {
+    if (!b) return;
+    const s = ctx.createBufferSource();
+    s.buffer = b;
+    s.connect(out);
+    s.start(t0 + (guitar ? i * 0.035 : 0)); // stagger = strum
+  });
+}
+
 const audio = {};
-function play(midis, guitar, delay = 0) {
+function playFromDisk(midis, guitar, delay) {
   midis.forEach((m, i) => setTimeout(() => {
-    const src = `samples/${guitar ? 'guitar' : 'piano'}/${m}.mp3`;
+    const src = sample(m, guitar);
     const a = (audio[src] ??= new Audio(src)).cloneNode();
     a.volume = 0.5;
     a.play().catch(() => {});
-  }, (delay + (guitar ? i * 0.035 : 0)) * 1000)); // stagger = strum
+  }, (delay + (guitar ? i * 0.035 : 0)) * 1000));
 }
+
 const guitarMidis = frets => frets.flatMap((f, i) => (f >= 0 ? [TUNING[i] + f] : []));
-function playChord(c, delay) {
-  const guitar = $('inst').value === 'Guitar';
-  const g = guitar && guitarVoicings(c.r, c.q, 1)[0];
-  play(g ? guitarMidis(g.frets) : pianoVoicings(c.r, c.q)[0].notes, !!g, delay);
+function chordNotes(c) {
+  const g = $('inst').value === 'Guitar' && guitarVoicings(c.r, c.q, 1)[0];
+  return g ? [guitarMidis(g.frets), true] : [pianoVoicings(c.r, c.q)[0].notes, false];
 }
+const playChord = c => play(...chordNotes(c));
 
 // --- drawing ---
 function guitarSvg(frets, root) {
@@ -147,6 +174,10 @@ function render() {
   pv = pianoVoicings(cur.r, cur.q);
   $('piano').innerHTML = pv.map((v, i) =>
     `<button class="card" data-i="${i}">${pianoSvg(v.notes, cur.r)}<span>${v.label} · ${noteNames(v.notes)}</span></button>`).join('');
+
+  // fetch the samples for everything on screen now, so the first click doesn't wait on the network
+  gv.forEach(v => loadAll(guitarMidis(v.frets), true));
+  pv.forEach(v => loadAll(v.notes, false));
 }
 
 const on = (id, fn) => $(id).addEventListener('click', e => { const b = e.target.closest('button'); if (b) fn(b.dataset); });
@@ -168,7 +199,11 @@ on('guitar', d => play(guitarMidis(gv[+d.i].frets), true));
 on('piano', d => play(pv[+d.i].notes, false));
 $('play').onclick = () => playChord(cur);
 $('add').onclick = () => { prog.push({ ...cur }); save(); render(); };
-$('playProg').onclick = () => prog.forEach((c, i) => playChord(c, i * 1.2));
+$('playProg').onclick = async () => {
+  const chords = prog.map(chordNotes);
+  await Promise.all(chords.map(([midis, guitar]) => loadAll(midis, guitar))); // all loaded, so the beat stays even
+  chords.forEach(([midis, guitar], i) => play(midis, guitar, i * 1.2));
+};
 $('clear').onclick = () => { if (prog.length && confirm('Clear the progression?')) { prog = []; save(); render(); } };
 
 render();
